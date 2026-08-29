@@ -1,0 +1,84 @@
+@import 'tailwindcss';
+
+:root {
+  --background: #f3f6f4;
+  --foreground: #17211d;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  margin: 0;
+  min-width: 320px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: rgb(102 224 180 / 35%);
+  color: #10251f;
+}
+
+.form-input {
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid #d0dcd6;
+  border-radius: 12px;
+  background: #fff;
+  color: #23342c;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.form-input::placeholder {
+  color: #96a29c;
+}
+
+.form-input:focus {
+  border-color: #69b496;
+  box-shadow: 0 0 0 3px rgb(76 201 156 / 16%);
+  outline: none;
+}
+
+select.form-input {
+  padding-right: 34px;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgb(76 201 156 / 45%);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
