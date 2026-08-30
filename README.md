@@ -1,5 +1,7 @@
 # ProcureScope — SAM Project RAG Studio
 
+> 2026-08-30 extension: authenticated `POST /api/notifications/sam-alerts` now evaluates opportunity subscriptions against SAM notices using keyword, agency, NAICS, value and deadline criteria. Matching is deterministic, creates stable alert IDs, and never makes an automatic bid/no-bid decision. External scheduling and delivery require deployment configuration.
+
 ProcureScope is a separate, end-to-end SAM.gov opportunity-to-submission workspace. Every opportunity owns a private RAG namespace, authoritative sources, requirement matrix, capture plan, proposal history, reviews, and release controls. It does not depend on or modify `government_contracts_v2`.
 
 ## Product behavior
