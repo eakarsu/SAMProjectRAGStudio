@@ -174,9 +174,7 @@ function readableKind(value: string) {
 function isEmpty(value: unknown) {
   return (
     value === null ||
-    value === undefined ||
-    value === "" ||
-    (Array.isArray(value) && value.length === 0)
+    value === undefined
   );
 }
 
@@ -198,27 +196,31 @@ function formatDate(value: unknown) {
   ).format(date);
 }
 
-function StructuredValue({ value }: { value: unknown }) {
+export function StructuredValue({ value }: { value: unknown }) {
   if (isEmpty(value)) {
     return <span className="text-[#91a098]">Not provided</span>;
   }
+  if (value === "") return <span className="italic text-[#64736c]">Empty string</span>;
   if (typeof value !== "object") return <span>{String(value)}</span>;
   if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-[#64736c]">Empty list</span>;
+    const rows = value.every((item) => item !== null && typeof item === "object" && !Array.isArray(item))
+      ? value as Record<string, unknown>[] : null;
+    const columns = rows ? [...new Set(rows.flatMap((row) => Object.keys(row)))] : [];
+    if (rows && columns.length > 0 && rows.every((row) => columns.every((key) => row[key] === null || typeof row[key] !== "object"))) {
+      return <div className="overflow-x-auto rounded-xl border border-[#dfe7e3]"><table className="min-w-full text-left text-xs"><thead className="bg-[#f3f7f5]"><tr>{columns.map((key) => <th key={key} scope="col" className="px-3 py-2 font-bold text-[#526b5f]">{readableKind(key)}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index} className="border-t border-[#edf1ef]">{columns.map((key) => <td key={key} className="px-3 py-2 align-top"><StructuredValue value={row[key]} /></td>)}</tr>)}</tbody></table></div>;
+    }
     return (
-      <div className="flex flex-wrap gap-1.5">
+      <ol className="space-y-2">
         {value.map((item, index) => (
-          <span
+          <li
             key={`${String(item)}-${index}`}
-            className="rounded-lg border border-[#d8e4de] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#426155]"
+            className="rounded-lg border border-[#d8e4de] bg-white px-2.5 py-1 text-[11px] text-[#426155]"
           >
-            {typeof item === "object" ? (
-              <StructuredValue value={item} />
-            ) : (
-              String(item)
-            )}
-          </span>
+            <StructuredValue value={item} />
+          </li>
         ))}
-      </div>
+      </ol>
     );
   }
   return (

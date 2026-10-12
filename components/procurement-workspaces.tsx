@@ -55,6 +55,7 @@ import {
   RagBoundaryCard,
 } from "@/components/ui-kit";
 import { RequirementsPanel } from "@/components/project-basics";
+import JsonReport from "@/components/JsonReport";
 import { ProposalStudio } from "@/components/proposal-studio";
 import {
   approvalRecord,
@@ -1471,7 +1472,7 @@ function analysisResult(
   return value as unknown as ProfessionalAnswer;
 }
 
-function ProfessionalResult({
+export function ProfessionalResult({
   analysis,
   onApprove,
 }: {
@@ -1577,6 +1578,12 @@ function ProfessionalResult({
             </div>
           </details>
         ) : null}
+        <details className="mt-4 rounded-xl border border-[#e0e7e3]">
+          <summary className="flex cursor-pointer list-none items-center justify-between p-3 text-xs font-bold">Structured response (JSON)<ChevronDown className="h-4 w-4" /></summary>
+          <div className="border-t border-[#e5ebe8] p-3">
+            <JsonReport data={analysis.result} title="Governed AI analysis" model={analysis.model ?? undefined} />
+          </div>
+        </details>
         {onApprove && analysis.status !== "approved" ? (
           <button
             type="button"
@@ -1631,6 +1638,11 @@ export function AiActionsPanel({
   const [objective, setObjective] = useState(
     "Run a comprehensive evidence-grounded review using every relevant current source and all approved company proof. Identify strengths, risks, gaps, and specific next actions.",
   );
+  const objectivePresets = [
+    { label: "Decision brief", value: "Assess the current opportunity against the selected workflow. Separate verified strengths, hard stops, unknowns, and the next decision gate. Cite current project sources and approved company evidence." },
+    { label: "Evidence gaps", value: "Identify each material evidence gap for the selected workflow, its impact on the response, and the specific source or approved company proof needed to resolve it. Do not infer missing facts." },
+    { label: "Review actions", value: "Review the selected workflow for submission readiness. Prioritize concrete owner actions, deadlines, and unresolved risks using current project sources and approved company evidence." },
+  ];
   const [running, setRunning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async () => {
@@ -1752,6 +1764,13 @@ export function AiActionsPanel({
               <p className="mt-2 text-[8px] font-bold uppercase tracking-wide text-[#8da5cf]">
                 Company evidence: {action.companyEvidence}
               </p>
+            </button>
+          ))}
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2" aria-label="Fill analysis objective">
+          {objectivePresets.map((preset) => (
+            <button key={preset.label} type="button" disabled={Boolean(running)} onClick={() => setObjective(preset.value)} className="rounded-lg border border-white/20 bg-white/[0.08] px-3 py-2 text-[10px] font-bold text-white hover:bg-white/15 disabled:opacity-45">
+              Fill all · {preset.label}
             </button>
           ))}
         </div>

@@ -1,6 +1,7 @@
 import { all, first, newId, nowIso, parseJson, run } from '@/lib/db-helpers';
 import { generateAiProposalSection, openRouterStatus } from '@/lib/openrouter';
 import { nextJobProgress } from '@/lib/job-state';
+import { ConflictError } from '@/lib/errors';
 import {
   formatJob,
   formatProposal,
@@ -131,10 +132,34 @@ export async function getJob(ownerId: string, jobId: string) {
   return formatJob(job);
 }
 
+export async function cancelGenerationJob(ownerId: string, jobId: string) {
+  const job = await first<JobRow>('SELECT * FROM jobs WHERE id = ? AND owner_id = ?', [jobId, ownerId]);
+  if (!job) throw new NotFoundError('Generation job not found.');
+  if (job.status === 'cancelled') return formatJob(job);
+  const changed = await run(`UPDATE jobs SET status = 'cancelled', stage = 'Cancelled by operator', error = 'Generation cancelled. Retained sections remain available; no further section will be applied.', updated_at = ?, completed_at = ? WHERE id = ? AND owner_id = ? AND status IN ('queued', 'running', 'blocked')`, [nowIso(), nowIso(), jobId, ownerId]);
+  if (!changed.meta.changes) throw new ConflictError('The generation job has already completed. Reload its saved result.');
+  await recordAudit(ownerId, job.project_id, 'ai.job.cancelled', 'job', jobId, {retainedStep:job.current_step});
+  return getJob(ownerId, jobId);
+}
+
+function watchClaim(ownerId: string, jobId: string, claimedAt: string, controller: AbortController) {
+  let active = true, checking = false;
+  const timer = setInterval(async () => {
+    if (!active || checking) return;
+    checking = true;
+    try {
+      const current = await first<Pick<JobRow, 'status' | 'updated_at'>>('SELECT status, updated_at FROM jobs WHERE id = ? AND owner_id = ?', [jobId, ownerId]);
+      if (active && (!current || current.status !== 'running' || current.updated_at !== claimedAt)) controller.abort(new DOMException('Generation cancelled or claim superseded', 'AbortError'));
+    } catch { if (active) controller.abort(new DOMException('Could not verify generation claim', 'AbortError')); }
+    finally { checking = false; }
+  }, 300);
+  return () => { active = false; clearInterval(timer); };
+}
+
 export async function advanceGenerationJob(ownerId: string, jobId: string) {
   const job = await first<JobRow>('SELECT * FROM jobs WHERE id = ? AND owner_id = ?', [jobId, ownerId]);
   if (!job) throw new NotFoundError('Generation job not found.');
-  if (job.status === 'completed') return formatJob(job);
+  if (job.status === 'completed' || job.status === 'cancelled') return formatJob(job);
   const request = parseJson<{ intent: string; sections: GenerationSection[] }>(job.request_json, {
     intent: 'full',
     sections: generationPlan('full').sections,
@@ -146,14 +171,17 @@ export async function advanceGenerationJob(ownerId: string, jobId: string) {
   }
 
   const staleBefore = new Date(Date.now() - 2 * 60_000).toISOString();
+  const claimedAt = nowIso();
   const claim = await run(
     `UPDATE jobs SET status = 'running', stage = ?, error = NULL, updated_at = ?
       WHERE id = ? AND owner_id = ? AND current_step = ?
       AND (status IN ('queued', 'blocked') OR (status = 'running' AND updated_at < ?))`,
-    [`Generating ${section.title}`, nowIso(), jobId, ownerId, job.current_step, staleBefore],
+    [`Generating ${section.title}`, claimedAt, jobId, ownerId, job.current_step, staleBefore],
   );
   if ((claim.meta.changes ?? 0) === 0) return getJob(ownerId, jobId);
 
+  const controller = new AbortController();
+  const stopWatching = watchClaim(ownerId, jobId, claimedAt, controller);
   try {
     const project = await getOwnedProject(ownerId, job.project_id);
     const evidence = await retrieveProjectEvidence(ownerId, job.project_id, section.retrievalQuery, 10);
@@ -163,17 +191,18 @@ export async function advanceGenerationJob(ownerId: string, jobId: string) {
       instructions: section.instructions,
       projectTitle: project.title,
       chunks: evidence,
-    });
+    }, controller.signal);
+    controller.signal.throwIfAborted();
     const previousResults = parseJson<ProposalSection[]>(job.result_json, []);
     const results = [...previousResults, generated.section];
     const responseIds = parseJson<string[]>(job.provider_response_ids_json, []);
     if (generated.providerResponseId) responseIds.push(generated.providerResponseId);
     const { nextStep, completed, progress } = nextJobProgress(job.current_step, request.sections.length);
     const now = nowIso();
-    await run(
+    const retained = await run(
       `UPDATE jobs SET status = ?, stage = ?, progress = ?, current_step = ?, result_json = ?,
         model = ?, provider_response_ids_json = ?, updated_at = ?, completed_at = ?
-        WHERE id = ? AND owner_id = ? AND current_step = ?`,
+        WHERE id = ? AND owner_id = ? AND current_step = ? AND status = 'running' AND updated_at = ?`,
       [
         completed ? 'completed' : 'queued',
         completed ? 'Draft ready' : `Saved ${section.title}`,
@@ -187,8 +216,10 @@ export async function advanceGenerationJob(ownerId: string, jobId: string) {
         jobId,
         ownerId,
         job.current_step,
+        claimedAt,
       ],
     );
+    if (!retained.meta.changes) return getJob(ownerId, jobId);
     if (completed) await createProposalFromJob(ownerId, jobId);
     await recordAudit(ownerId, job.project_id, 'ai.job.step.completed', 'job', jobId, {
       section: section.key,
@@ -200,34 +231,35 @@ export async function advanceGenerationJob(ownerId: string, jobId: string) {
     const message = error instanceof Error ? error.message : 'The generation step failed.';
     await run(
       `UPDATE jobs SET status = 'blocked', stage = 'Action required', error = ?, updated_at = ?
-        WHERE id = ? AND owner_id = ? AND current_step = ?`,
-      [message, nowIso(), jobId, ownerId, job.current_step],
+        WHERE id = ? AND owner_id = ? AND current_step = ? AND status = 'running' AND updated_at = ?`,
+      [message, nowIso(), jobId, ownerId, job.current_step, claimedAt],
     );
-  }
+  } finally { stopWatching(); }
   return getJob(ownerId, jobId);
 }
 
 export async function runGenerationJobToCompletion(ownerId: string, jobId: string) {
   for (let step = 0; step < 40; step += 1) {
     const job = await advanceGenerationJob(ownerId, jobId);
-    if (job.status === 'completed' || job.status === 'blocked') return job;
+    if (job.status === 'completed' || job.status === 'blocked' || job.status === 'cancelled') return job;
   }
   return getJob(ownerId, jobId);
 }
 
 async function finalizeJob(ownerId: string, job: JobRow) {
   const now = nowIso();
-  await run(
+  const completed = await run(
     `UPDATE jobs SET status = 'completed', stage = 'Draft ready', progress = 100, completed_at = ?, updated_at = ?
-      WHERE id = ? AND owner_id = ?`,
-    [now, now, job.id, ownerId],
+      WHERE id = ? AND owner_id = ? AND current_step = ? AND status IN ('queued', 'running', 'blocked')`,
+    [now, now, job.id, ownerId, job.current_step],
   );
-  await createProposalFromJob(ownerId, job.id);
+  if (completed.meta.changes) await createProposalFromJob(ownerId, job.id);
 }
 
 async function createProposalFromJob(ownerId: string, jobId: string) {
   const job = await first<JobRow>('SELECT * FROM jobs WHERE id = ? AND owner_id = ?', [jobId, ownerId]);
   if (!job) throw new NotFoundError('Generation job not found.');
+  if (job.status !== 'completed') throw new ConflictError('Only a completed generation job can create a proposal.');
   const existing = await first<ProposalRow>('SELECT * FROM proposals WHERE job_id = ? AND owner_id = ?', [jobId, ownerId]);
   if (existing) return formatProposal(existing);
   const sections = parseJson<ProposalSection[]>(job.result_json, []);

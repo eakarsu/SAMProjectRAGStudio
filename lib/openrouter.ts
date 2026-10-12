@@ -61,15 +61,21 @@ export type OpenRouterResult = {
   };
 };
 
-async function wait(milliseconds: number) {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function wait(milliseconds: number, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const cancelled = () => { clearTimeout(timer); reject(signal?.reason ?? new DOMException('Request cancelled', 'AbortError')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', cancelled); resolve(); }, milliseconds);
+    signal?.addEventListener('abort', cancelled, {once:true});
+  });
 }
 
 export async function callOpenRouter(
   system: string,
   user: string,
-  options: { maxTokens?: number; temperature?: number } = {},
+  options: { maxTokens?: number; temperature?: number; signal?: AbortSignal } = {},
 ): Promise<OpenRouterResult> {
+  options.signal?.throwIfAborted();
   const apiKey = configuredValue("OPENROUTER_API_KEY");
   if (!apiKey) {
     throw new AiConfigurationError(
@@ -78,7 +84,10 @@ export async function callOpenRouter(
   }
   const model = configuredValue("OPENROUTER_MODEL") ?? DEFAULT_MODEL;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    options.signal?.throwIfAborted();
     const controller = new AbortController();
+    const cancel = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener('abort', cancel, {once:true});
     const timeout = setTimeout(() => controller.abort(), 70_000);
     try {
       const response = await fetch(OPENROUTER_ENDPOINT, {
@@ -105,12 +114,15 @@ export async function callOpenRouter(
           response_format: { type: "json_object" },
         }),
       });
+      options.signal?.throwIfAborted();
       if (response.ok) {
         const payload = (await response.json()) as {
           id?: string;
           model?: string;
           choices?: Array<{
+            finish_reason?: string;
             message?: {
+              refusal?: string | null;
               content?: string | Array<{ type?: string; text?: string }>;
             };
           }>;
@@ -121,6 +133,11 @@ export async function callOpenRouter(
           };
           error?: { message?: string };
         };
+        options.signal?.throwIfAborted();
+        const choice = payload.choices?.[0];
+        if (payload.error || choice?.message?.refusal || ['length', 'content_filter'].includes(choice?.finish_reason ?? '')) {
+          throw new AiProviderError('The AI response was refused, truncated, or rejected. No answer was applied.');
+        }
         const rawContent = payload.choices?.[0]?.message?.content;
         const content =
           typeof rawContent === "string"
@@ -153,6 +170,7 @@ export async function callOpenRouter(
             5_000,
             Math.max(350, retryAfter * 1_000 || 650 * (attempt + 1)),
           ),
+          options.signal,
         );
         continue;
       }
@@ -165,6 +183,7 @@ export async function callOpenRouter(
         `The AI provider could not complete this request (${response.status}).`,
       );
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (error instanceof AiConfigurationError) throw error;
       if (
         error instanceof AiProviderError &&
@@ -175,7 +194,7 @@ export async function callOpenRouter(
         error instanceof Error &&
         (error.name === "AbortError" || error instanceof TypeError);
       if (transient && attempt < 2) {
-        await wait(500 * (attempt + 1));
+        await wait(500 * (attempt + 1), options.signal);
         continue;
       }
       if (error instanceof AiProviderError) throw error;
@@ -188,6 +207,7 @@ export async function callOpenRouter(
       );
     } finally {
       clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', cancel);
     }
   }
   throw new AiProviderError("The AI provider did not complete this request.");
@@ -210,6 +230,7 @@ function evidencePrompt(chunks: RankedChunk[]) {
 export async function askAiWithEvidence(
   question: string,
   chunks: RankedChunk[],
+  signal?: AbortSignal,
 ): Promise<{
   answer: ProfessionalAnswer;
   model: string;
@@ -229,7 +250,7 @@ Allowed severity values: strength, risk, gap, evidence, neutral. Do not include 
   const result = await callOpenRouter(
     system,
     `QUESTION\n${question}\n\nPROJECT EVIDENCE\n${evidencePrompt(chunks)}`,
-    { maxTokens: 2200 },
+    { maxTokens: 2200, signal },
   );
   const validation = answerSchema.safeParse(extractJson(result.content));
   if (!validation.success) {
@@ -289,7 +310,7 @@ export async function generateAiProposalSection(input: {
   instructions: string;
   projectTitle: string;
   chunks: RankedChunk[];
-}): Promise<{
+}, signal?: AbortSignal): Promise<{
   section: ProposalSection;
   model: string;
   providerResponseId: string | null;
@@ -306,7 +327,7 @@ Return only JSON with title, body, citations. Do not include markdown fences.`;
   const result = await callOpenRouter(
     system,
     `PROJECT\n${input.projectTitle}\n\nSECTION\n${input.sectionTitle}\n\nDRAFTING INSTRUCTIONS\n${input.instructions}\n\nPROJECT EVIDENCE\n${evidencePrompt(input.chunks)}`,
-    { maxTokens: 2600, temperature: 0.15 },
+    { maxTokens: 2600, temperature: 0.15, signal },
   );
   const validation = proposalSectionSchema.safeParse(
     extractJson(result.content),

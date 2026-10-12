@@ -12,10 +12,11 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ProfessionalAnswer } from '@/lib/types';
 import type { ProjectDetail, ReviewResponse } from '@/components/ui-types';
 import { fetchJson, RagBoundaryCard } from '@/components/ui-kit';
+import JsonReport from '@/components/JsonReport';
 
 const promptStarters = [
   { label: 'Scope & outcomes', value: 'Summarize the mission scope, required outcomes, and explicit success measures.' },
@@ -32,19 +33,26 @@ export function AiReview({ detail, aiConfigured }: { detail: ProjectDetail; aiCo
   const [answer, setAnswer] = useState<ProfessionalAnswer | null>(null);
   const [model, setModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const request = useRef<AbortController | null>(null);
+  const cancel = () => { request.current?.abort(); request.current = null; setRunning(false); setAnswer(null); setError('Request cancelled. Your project question is preserved.'); };
+  useEffect(() => () => { request.current?.abort(); request.current = null; }, []);
+  useEffect(() => { if (request.current) cancel(); }, [detail.project.id]);
 
   const submit = async (selectedMode: 'ai' | 'evidence') => {
+    if (request.current) return;
+    const controller = new AbortController(); request.current = controller;
     setRunning(true); setError(null); setMode(selectedMode);
     try {
       const response = await fetchJson<ReviewResponse>(`/api/projects/${detail.project.id}/ask`, {
+        signal: controller.signal,
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ question, mode: selectedMode }),
       });
-      setAnswer(response.answer); setModel(response.model);
+      if (!controller.signal.aborted) { setAnswer(response.answer); setModel(response.model); }
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'The review could not be completed.');
-    } finally { setRunning(false); }
+      if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : 'The review could not be completed.');
+    } finally { if (request.current === controller) { request.current = null; setRunning(false); } }
   };
 
   return (
@@ -52,12 +60,13 @@ export function AiReview({ detail, aiConfigured }: { detail: ProjectDetail; aiCo
       <div className="space-y-6">
         <section className="rounded-[22px] bg-[#101b36] p-5 text-white shadow-[0_12px_32px_rgba(16,27,54,0.15)] md:p-6">
           <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#89a7e5]">Governed project review</p><h2 className="mt-2 text-xl font-bold">Ask about this opportunity</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-[#b8c5dd]">Choose a prepared question or write your own. Retrieval is locked to this project before any evidence is ranked.</p></div><Sparkles className="h-6 w-6 shrink-0 text-[#9ab8f2]" /></div>
-          <div className="mb-4 flex flex-wrap gap-2">{promptStarters.map((starter) => <button key={starter.label} type="button" onClick={() => setQuestion(starter.value)} className={`rounded-lg border px-3 py-2 text-[10px] font-bold transition ${question === starter.value ? 'border-[#8ca9e4] bg-[#5c75aa]/35 text-white' : 'border-white/15 bg-white/[0.05] text-[#c7d2e7] hover:bg-white/10'}`}>{starter.label}</button>)}</div>
-          <textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={4} className="w-full resize-y rounded-xl border border-white/15 bg-white/[0.08] px-4 py-3 text-sm leading-6 text-white placeholder:text-[#8291af]" placeholder="Ask a question about scope, requirements, evaluation, amendments, or risks…" />
+          <div className="mb-4 flex flex-wrap gap-2">{promptStarters.map((starter) => <button key={starter.label} type="button" disabled={running} onClick={() => setQuestion(starter.value)} className={`rounded-lg border px-3 py-2 text-[10px] font-bold transition ${question === starter.value ? 'border-[#8ca9e4] bg-[#5c75aa]/35 text-white' : 'border-white/15 bg-white/[0.05] text-[#c7d2e7] hover:bg-white/10'}`}>{starter.label}</button>)}</div>
+          <textarea disabled={running} maxLength={2000} value={question} onChange={(event) => setQuestion(event.target.value)} rows={4} className="w-full resize-y rounded-xl border border-white/15 bg-white/[0.08] px-4 py-3 text-sm leading-6 text-white placeholder:text-[#8291af]" placeholder="Ask a question about scope, requirements, evaluation, amendments, or risks…" />
           <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-            <button type="button" disabled={running || !aiConfigured || question.trim().length < 4} onClick={() => void submit('ai')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-white px-4 text-xs font-black text-[#15244a] disabled:cursor-not-allowed disabled:opacity-45">{running && mode === 'ai' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />} Ask AI with project RAG</button>
+            <button type="button" disabled={running || !aiConfigured || question.trim().length < 4} onClick={() => void submit('ai')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-white px-4 text-xs font-black text-[#15244a] disabled:cursor-not-allowed disabled:opacity-45">{running && mode === 'ai' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <BrainCircuit className="h-4 w-4" />} Generate with OpenRouter</button>
             <button type="button" disabled={running || question.trim().length < 4} onClick={() => void submit('evidence')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/[0.08] px-4 text-xs font-bold text-white disabled:opacity-45">{running && mode === 'evidence' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <FileSearch className="h-4 w-4" />} Find evidence without AI</button>
           </div>
+          {running && <button type="button" onClick={cancel} className="mt-3 rounded-lg border border-white/20 px-4 py-2 text-sm">Cancel request</button>}
           {!aiConfigured ? <p className="mt-3 text-[10px] font-semibold text-[#f4c77a]">AI is unavailable until OPENROUTER_API_KEY is configured. Non-AI evidence search is ready.</p> : null}
         </section>
         {error ? <div className="rounded-2xl border border-[#f0c9b2] bg-[#fff8f3] p-4 text-sm text-[#8c4f2c]"><div className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span></div></div> : null}
@@ -81,7 +90,7 @@ function EmptyReviewState() {
   );
 }
 
-function ProfessionalAnswerView({ answer, model, mode }: {
+export function ProfessionalAnswerView({ answer, model, mode }: {
   answer: ProfessionalAnswer;
   model: string | null;
   mode: 'ai' | 'evidence';
@@ -103,6 +112,12 @@ function ProfessionalAnswerView({ answer, model, mode }: {
         ))}</div>
         {answer.nextActions.length ? <div className="mt-6"><h3 className="text-sm font-bold">Recommended next actions</h3><ol className="mt-3 space-y-2">{answer.nextActions.map((action, index) => <li key={`${action}-${index}`} className="flex gap-3 rounded-xl bg-[#f8faf9] p-3 text-xs leading-5 text-[#4f6259]"><span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-[#dff1e9] text-[10px] font-black text-[#276e53]">{index + 1}</span>{action}</li>)}</ol></div> : null}
         <div className="mt-6"><h3 className="text-sm font-bold">Source evidence</h3><div className="mt-3 space-y-2">{answer.citations.map((citation) => <details key={citation.id} className="group rounded-xl border border-[#dfe7e2] bg-[#fbfdfc]"><summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3 text-xs font-bold text-[#315d4d]"><span>{citation.id} · {citation.citation}</span><ChevronDown className="h-4 w-4 transition group-open:rotate-180" /></summary><div className="border-t border-[#e3eae6] px-3 py-3 text-xs leading-5 text-[#66776f]">{citation.excerpt}</div></details>)}</div></div>
+        <details className="mt-6 rounded-2xl border border-[#dfe7e2] bg-[#fbfdfc]">
+          <summary className="flex cursor-pointer list-none items-center justify-between p-3 text-xs font-bold text-[#315d4d]">Structured response (JSON)<ChevronDown className="h-4 w-4" /></summary>
+          <div className="border-t border-[#e3eae6] p-3">
+            <JsonReport data={answer} title="AI analysis" model={model ?? undefined} />
+          </div>
+        </details>
       </div>
     </section>
   );

@@ -9,7 +9,7 @@ import {
   RefreshCw,
   WandSparkles,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRecordDetails } from "@/components/record-details";
 import { jobRecord, proposalRecord } from "@/components/record-presets";
 import type {
@@ -36,23 +36,40 @@ export function ProposalStudio({
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const latest = detail.proposals[0] ?? null;
+  const polling = useRef<AbortController | null>(null);
+  const generation = useRef<symbol | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; polling.current?.abort(); polling.current = null; generation.current = null; }; }, [detail.project.id]);
+  const cancelJob = async (jobId: string) => {
+    try {
+      await fetchJson(`/api/jobs/${jobId}`, {method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({action:'cancel'})});
+      polling.current?.abort(); polling.current = null; generation.current = null; setRunningJobId(null); setCreating(null);
+      await onMutated('Generation cancelled. Retained sections and provider usage remain in the job audit.');
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not cancel the saved job.'); }
+  };
+
 
   const runJob = async (jobId: string) => {
+    if (polling.current) return;
+    const controller = new AbortController(); polling.current = controller;
     setRunningJobId(jobId);
     setError(null);
     try {
       await fetchJson<{ job: JobView }>(`/api/jobs/${jobId}/step`, {
-        method: "POST",
+        method: "POST", signal: controller.signal,
       });
       for (let poll = 0; poll < 90; poll += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+        await new Promise<void>((resolve, reject) => { const cancelled = () => { window.clearTimeout(timer); reject(new DOMException('Polling cancelled','AbortError')); }; const timer = window.setTimeout(() => { controller.signal.removeEventListener('abort',cancelled); resolve(); }, 1_000); controller.signal.addEventListener('abort',cancelled,{once:true}); });
+        controller.signal.throwIfAborted();
         const response = await fetchJson<{ job: JobView }>(
-          `/api/jobs/${jobId}`,
+          `/api/jobs/${jobId}`, {signal:controller.signal},
         );
+        if (controller.signal.aborted || !mounted.current) return;
         if (response.job.status === "completed") {
           await onMutated("AI draft completed and saved.");
           break;
         }
+        if (response.job.status === "cancelled") { await onMutated("Generation cancelled."); break; }
         if (response.job.status === "blocked") {
           setError(response.job.error ?? "Generation paused for review.");
           await onMutated();
@@ -60,6 +77,7 @@ export function ProposalStudio({
         }
       }
     } catch (requestError) {
+      if (controller.signal.aborted || !mounted.current) return;
       setError(
         requestError instanceof Error
           ? requestError.message
@@ -67,11 +85,13 @@ export function ProposalStudio({
       );
       await onMutated();
     } finally {
-      setRunningJobId(null);
+      if (polling.current === controller) { polling.current = null; setRunningJobId(null); }
     }
   };
 
   const createAi = async () => {
+    if (generation.current || polling.current) return;
+    const token = Symbol(); generation.current = token;
     setCreating("ai");
     setError(null);
     try {
@@ -83,18 +103,20 @@ export function ProposalStudio({
           body: JSON.stringify({ intent, mode: "ai" }),
         },
       );
+      if (!mounted.current || generation.current !== token) return;
       await onMutated(
         "AI job saved. Generation is starting section by section.",
       );
       await runJob(response.job.id);
     } catch (requestError) {
+      if (!mounted.current || generation.current !== token) return;
       setError(
         requestError instanceof Error
           ? requestError.message
           : "The AI job could not be created.",
       );
     } finally {
-      setCreating(null);
+      if (generation.current === token) { generation.current = null; setCreating(null); }
     }
   };
 
@@ -138,11 +160,13 @@ export function ProposalStudio({
               saved draft never regenerates it.
             </p>
           </div>
+          <div className="mb-4 flex flex-wrap gap-2" aria-label="Fill every generation field">{[['full','Full proposal'],['technical','Technical response'],['compliance','Compliance response']].map(([value,label])=><button key={value} type="button" disabled={Boolean(creating) || Boolean(runningJobId)} onClick={()=>setIntent(value)} className="rounded-lg border border-[#cfdbd5] px-3 py-2 text-xs font-semibold">Fill all · {label}</button>)}</div>
           <label className="mb-5 block">
             <span className="mb-2 block text-xs font-bold text-[#435a50]">
               Draft intent
             </span>
             <select
+              disabled={Boolean(creating) || Boolean(runningJobId)}
               value={intent}
               onChange={(event) => setIntent(event.target.value)}
               className="min-h-11 w-full max-w-md rounded-xl border border-[#cfdbd5] bg-white px-3 text-sm font-semibold"
@@ -152,10 +176,11 @@ export function ProposalStudio({
               <option value="compliance">Compliance response</option>
             </select>
           </label>
+          {runningJobId && <button type="button" onClick={()=>void cancelJob(runningJobId)} className="mb-4 rounded-lg border border-[#cfdbd5] px-4 py-2 text-sm font-semibold">Cancel generation</button>}
           <div className="grid gap-3 md:grid-cols-2">
             <button
               type="button"
-              disabled={Boolean(creating) || !aiConfigured}
+              disabled={Boolean(creating) || Boolean(runningJobId) || !aiConfigured}
               onClick={() => void createAi()}
               className="rounded-2xl bg-[#173f34] p-5 text-left text-white transition hover:bg-[#12352b] disabled:cursor-not-allowed disabled:opacity-55"
             >
@@ -169,7 +194,7 @@ export function ProposalStudio({
                   <ChevronRight className="h-5 w-5 text-[#79b7a1]" />
                 )}
               </div>
-              <h3 className="mt-5 text-sm font-bold">Generate new with AI</h3>
+              <h3 className="mt-5 text-sm font-bold">Generate with OpenRouter</h3>
               <p className="mt-2 text-xs leading-5 text-[#b6cec5]">
                 Fresh OpenRouter generation using only retrieved project
                 evidence. The job is saved and resumable.
@@ -182,7 +207,7 @@ export function ProposalStudio({
             </button>
             <button
               type="button"
-              disabled={Boolean(creating)}
+              disabled={Boolean(creating) || Boolean(runningJobId)}
               onClick={() => void createOutline()}
               className="rounded-2xl border border-[#cfdcd5] bg-[#f8fbf9] p-5 text-left transition hover:border-[#96c3b0] disabled:opacity-55"
             >
@@ -350,6 +375,7 @@ export function ProposalStudio({
                       {job.currentStep ? "Resume saved job" : "Start saved job"}
                     </button>
                   ) : null}
+                  {['queued','running','blocked'].includes(job.status) && <button type="button" onClick={()=>void cancelJob(job.id)} className="rounded-lg border border-[#cfdbd5] px-3 py-2 text-xs font-semibold">Cancel saved job</button>}
                 </div>
               </div>
             ))}

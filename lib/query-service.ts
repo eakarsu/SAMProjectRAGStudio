@@ -8,15 +8,18 @@ export async function queryProject(
   projectId: string,
   question: string,
   mode: 'ai' | 'evidence',
+  signal?: AbortSignal,
 ) {
+  signal?.throwIfAborted();
   const project = await getOwnedProject(ownerId, projectId);
   const trimmed = question.trim();
   if (trimmed.length < 4) throw new Error('Ask a more specific project question.');
   if (trimmed.length > 2_000) throw new Error('Project questions must be 2,000 characters or shorter.');
   const chunks = await retrieveProjectEvidence(ownerId, projectId, trimmed, mode === 'ai' ? 10 : 8);
   const result = mode === 'ai'
-    ? await askAiWithEvidence(trimmed, chunks)
+    ? await askAiWithEvidence(trimmed, chunks, signal)
     : { answer: buildEvidenceBrief(trimmed, chunks), model: null, providerResponseId: null, usage: {} };
+  signal?.throwIfAborted();
   const queryId = newId('query');
   await run(
     `INSERT INTO rag_queries (

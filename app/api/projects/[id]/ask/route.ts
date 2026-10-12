@@ -14,8 +14,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const actor = await requireWorkspaceActor(request);
     const { id } = await context.params;
     const input = schema.parse(await request.json());
-    return json(await queryProject(actor.workspaceOwnerId, id, input.question, input.mode));
+    return json(await queryProject(actor.workspaceOwnerId, id, input.question, input.mode, request.signal));
   } catch (error) {
+    if (request.signal.aborted) return json({error:'Request cancelled'}, {status:499});
     if (error instanceof AiConfigurationError) return json({ error: error.message, code: 'AI_NOT_CONFIGURED' }, { status: 503 });
     if (error instanceof AiProviderError) return json({ error: error.message, code: 'AI_PROVIDER_ERROR' }, { status: 502 });
     return errorResponse(error);
