@@ -26,6 +26,20 @@ const importSchema = z.discriminatedUnion('mode', [
   }),
 ]);
 
+export async function GET(request: Request) {
+  try {
+    const actor = await requireWorkspaceActor(request);
+    const url = new URL(request.url);
+    const { listProjects } = await import("@/lib/project-repository");
+    const { filterProjects } = await import("@/lib/ai-fallback");
+    const rows = filterProjects(await listProjects(actor.workspaceOwnerId), {
+      search: url.searchParams.get("search") ?? url.searchParams.get("q") ?? undefined,
+      status: url.searchParams.get("status") ?? undefined,
+    });
+    return json({ rows });
+  } catch (error) { return errorResponse(error); }
+}
+
 export async function POST(request: Request) {
   try {
     const actor = await requireWorkspaceActor(request);

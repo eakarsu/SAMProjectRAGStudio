@@ -39,6 +39,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+<script src="/feature-pack/feature-pack.js" defer />
         {children}
       </body>
     </html>
